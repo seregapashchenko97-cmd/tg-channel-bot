@@ -25,6 +25,9 @@ DB_NAME = "bot.db"
 @dp.message(CommandStart())
 async def start(message: Message):
 
+
+
+
 keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [
