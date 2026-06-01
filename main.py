@@ -4,6 +4,8 @@ import aiosqlite
 
 from datetime import datetime
 
+from aiogram.types import ReplyKeyboardMarkup
+from aiogram.types import KeyboardButton
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 from aiogram.filters import CommandStart
@@ -23,13 +25,64 @@ DB_NAME = "bot.db"
 @dp.message(CommandStart())
 async def start(message: Message):
 
+keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [
+            KeyboardButton(text="📢 Мої канали"),
+            KeyboardButton(text="📝 Створити пост")
+        ],
+        [
+            KeyboardButton(text="📋 Черга"),
+            KeyboardButton(text="❤️ Підтримати")
+        ]
+    ],
+    resize_keyboard=True
+)
+
+await message.answer(
+    "🚀 PostPilot UA\n\n"
+    "Автопостинг для Telegram-каналів",
+    reply_markup=keyboard
+)
+
+@dp.message(F.text == "📢 Мої канали")
+async def my_channels(message: Message):
+
+```
+async with aiosqlite.connect(DB_NAME) as db:
+
+    cursor = await db.execute("""
+    SELECT title
+    FROM channels
+    WHERE user_id=?
+    """, (message.from_user.id,))
+
+    rows = await cursor.fetchall()
+
+if not rows:
     await message.answer(
-        "🚀 Бот автопостинга\n\n"
-        "Команды:\n"
-        "/addchannel\n"
-        "/channels\n"
-        "/newpost"
+        "У вас ще немає каналів.\n\n"
+        "Перешліть будь-яке повідомлення зі свого каналу."
     )
+    return
+
+text = "📢 Ваші канали:\n\n"
+
+for row in rows:
+    text += f"• {row[0]}\n"
+
+await message.answer(text)
+```
+
+@dp.message(F.text == "❤️ Підтримати")
+async def donate(message: Message):
+
+```
+await message.answer(
+    "❤️ Дякуємо за підтримку проекту\n\n"
+    "Пізніше тут буде Monobank банка."
+)
+```
 
 
 @dp.message(F.forward_from_chat)
