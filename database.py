@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS posts (
     text TEXT NOT NULL DEFAULT '',
     media_type TEXT NOT NULL DEFAULT 'text',
     media_file_id TEXT,
+    parse_mode TEXT,
+    buttons_json TEXT,
     publish_at TEXT NOT NULL,
     repeat_type TEXT NOT NULL DEFAULT 'none',
     repeat_weekday INTEGER,
@@ -60,6 +62,8 @@ async def migrate_posts(db: aiosqlite.Connection) -> None:
         "group_id": "ALTER TABLE posts ADD COLUMN group_id TEXT",
         "media_type": "ALTER TABLE posts ADD COLUMN media_type TEXT NOT NULL DEFAULT 'text'",
         "media_file_id": "ALTER TABLE posts ADD COLUMN media_file_id TEXT",
+        "parse_mode": "ALTER TABLE posts ADD COLUMN parse_mode TEXT",
+        "buttons_json": "ALTER TABLE posts ADD COLUMN buttons_json TEXT",
         "repeat_type": "ALTER TABLE posts ADD COLUMN repeat_type TEXT NOT NULL DEFAULT 'none'",
         "repeat_weekday": "ALTER TABLE posts ADD COLUMN repeat_weekday INTEGER",
     }
