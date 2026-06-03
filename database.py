@@ -1,30 +1,37 @@
 import aiosqlite
 
 
-DB_NAME = "bot.db"
-
-
-async def init_db():
-    async with aiosqlite.connect(DB_NAME) as db:
-
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS channels (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            channel_id INTEGER,
-            title TEXT
+async def init_db(db_name: str = "bot.db") -> None:
+    async with aiosqlite.connect(db_name) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                username TEXT,
+                promo_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, channel_id)
+            )
+            """
         )
-        """)
 
-        await db.execute("""
-        CREATE TABLE IF NOT EXISTS posts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            channel_id INTEGER,
-            text TEXT,
-            publish_at TEXT,
-            status TEXT DEFAULT 'pending'
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                publish_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                sent_at TEXT
+            )
+            """
         )
-        """)
 
         await db.commit()
