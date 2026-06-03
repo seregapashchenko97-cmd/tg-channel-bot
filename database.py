@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     username TEXT,
     first_name TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -50,8 +51,19 @@ async def init_db(db_name: str) -> None:
         await db.execute(CREATE_USERS)
         await db.execute(CREATE_CHANNELS)
         await db.execute(CREATE_POSTS)
+        await migrate_users(db)
         await migrate_posts(db)
         await db.commit()
+
+
+async def migrate_users(db: aiosqlite.Connection) -> None:
+    cursor = await db.execute("PRAGMA table_info(users)")
+    columns = {row[1] for row in await cursor.fetchall()}
+
+    if "last_seen" not in columns:
+        await db.execute("ALTER TABLE users ADD COLUMN last_seen TEXT")
+
+    await db.execute("UPDATE users SET last_seen = created_at WHERE last_seen IS NULL")
 
 
 async def migrate_posts(db: aiosqlite.Connection) -> None:
@@ -85,7 +97,8 @@ async def upsert_user(db_name: str, user) -> None:
             VALUES (?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 username=excluded.username,
-                first_name=excluded.first_name
+                first_name=excluded.first_name,
+                last_seen=CURRENT_TIMESTAMP
             """,
             (user.id, user.username, user.first_name),
         )
