@@ -1,7 +1,8 @@
 import asyncio
+import calendar
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -42,7 +43,9 @@ timezone = ZoneInfo(TIMEZONE_NAME)
 class PostForm(StatesGroup):
     choosing_channel = State()
     writing_text = State()
-    choosing_time = State()
+    choosing_date = State()
+    choosing_hour = State()
+    choosing_minute = State()
 
 
 def main_keyboard() -> ReplyKeyboardMarkup:
@@ -55,10 +58,6 @@ def main_keyboard() -> ReplyKeyboardMarkup:
             [
                 KeyboardButton(text="📝 Створити пост"),
                 KeyboardButton(text="📋 Черга"),
-            ],
-            [
-                KeyboardButton(text="📣 Реклама"),
-                KeyboardButton(text="❤️ Підтримати"),
             ],
         ],
         resize_keyboard=True,
@@ -95,20 +94,83 @@ async def channel_count(user_id: int) -> int:
     return row[0]
 
 
-def parse_publish_time(value: str) -> str | None:
-    value = value.strip()
-    for fmt in ("%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M"):
-        try:
-            publish_at = datetime.strptime(value, fmt).replace(tzinfo=timezone)
-        except ValueError:
-            continue
+def month_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    month_title = date(year, month, 1).strftime("%B %Y")
+    previous_month = month - 1
+    previous_year = year
+    next_month = month + 1
+    next_year = year
 
-        if publish_at <= datetime.now(timezone):
-            return None
+    if previous_month == 0:
+        previous_month = 12
+        previous_year -= 1
 
-        return publish_at.strftime("%Y-%m-%d %H:%M:%S")
+    if next_month == 13:
+        next_month = 1
+        next_year += 1
 
-    return None
+    buttons = [
+        [
+            InlineKeyboardButton(text="‹", callback_data=f"cal:month:{previous_year}:{previous_month}"),
+            InlineKeyboardButton(text=month_title, callback_data="cal:ignore"),
+            InlineKeyboardButton(text="›", callback_data=f"cal:month:{next_year}:{next_month}"),
+        ],
+        [
+            InlineKeyboardButton(text="Пн", callback_data="cal:ignore"),
+            InlineKeyboardButton(text="Вт", callback_data="cal:ignore"),
+            InlineKeyboardButton(text="Ср", callback_data="cal:ignore"),
+            InlineKeyboardButton(text="Чт", callback_data="cal:ignore"),
+            InlineKeyboardButton(text="Пт", callback_data="cal:ignore"),
+            InlineKeyboardButton(text="Сб", callback_data="cal:ignore"),
+            InlineKeyboardButton(text="Нд", callback_data="cal:ignore"),
+        ],
+    ]
+
+    today = datetime.now(timezone).date()
+    for week in calendar.monthcalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(text=" ", callback_data="cal:ignore"))
+                continue
+
+            selected_date = date(year, month, day)
+            if selected_date < today:
+                row.append(InlineKeyboardButton(text="·", callback_data="cal:ignore"))
+            else:
+                row.append(
+                    InlineKeyboardButton(
+                        text=str(day),
+                        callback_data=f"cal:day:{year}:{month}:{day}",
+                    )
+                )
+        buttons.append(row)
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def hour_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    for start in range(0, 24, 4):
+        buttons.append(
+            [
+                InlineKeyboardButton(text=f"{hour:02d}:00", callback_data=f"hour:{hour}")
+                for hour in range(start, start + 4)
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def minute_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    for start in range(0, 60, 15):
+        buttons.append(
+            [
+                InlineKeyboardButton(text=f"{minute:02d}", callback_data=f"minute:{minute}")
+                for minute in range(start, start + 15, 5)
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 @dp.message(CommandStart())
@@ -178,7 +240,7 @@ async def my_channels(message: Message) -> None:
     async with aiosqlite.connect(DB_NAME) as db:
         cursor = await db.execute(
             """
-            SELECT title, channel_id, promo_enabled
+            SELECT title, channel_id
             FROM channels
             WHERE user_id=?
             ORDER BY title
@@ -195,58 +257,10 @@ async def my_channels(message: Message) -> None:
         return
 
     text = "📢 Ваші канали:\n\n"
-    for title, channel_id, promo_enabled in rows:
-        promo = "увімкнено" if promo_enabled else "вимкнено"
-        text += f"• {title}\n  ID: {channel_id}\n  Рекламний підпис: {promo}\n\n"
+    for title, channel_id in rows:
+        text += f"• {title}\n  ID: {channel_id}\n\n"
 
     await message.answer(text)
-
-
-@dp.message(F.text == "📣 Реклама")
-async def promo_settings(message: Message) -> None:
-    if await channel_count(message.from_user.id) == 0:
-        await message.answer("Спочатку додайте хоча б один канал.")
-        return
-
-    await message.answer(
-        "Рекламний підпис додається тільки до постів у ваших підключених каналах.\n"
-        "Виберіть канал, щоб увімкнути або вимкнути підпис:",
-        reply_markup=await user_channels_keyboard(message.from_user.id, "promo"),
-    )
-
-
-@dp.callback_query(F.data.startswith("promo:"))
-async def toggle_promo(callback: CallbackQuery) -> None:
-    channel_id = int(callback.data.split(":", 1)[1])
-
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            """
-            UPDATE channels
-            SET promo_enabled = CASE promo_enabled WHEN 1 THEN 0 ELSE 1 END
-            WHERE user_id=? AND channel_id=?
-            """,
-            (callback.from_user.id, channel_id),
-        )
-        await db.commit()
-
-        cursor = await db.execute(
-            """
-            SELECT title, promo_enabled
-            FROM channels
-            WHERE user_id=? AND channel_id=?
-            """,
-            (callback.from_user.id, channel_id),
-        )
-        row = await cursor.fetchone()
-
-    if not row:
-        await callback.answer("Канал не знайдено.", show_alert=True)
-        return
-
-    status = "увімкнено" if row[1] else "вимкнено"
-    await callback.message.answer(f"📣 {row[0]}: рекламний підпис {status}.")
-    await callback.answer()
 
 
 @dp.message(F.text == "📝 Створити пост")
@@ -278,28 +292,77 @@ async def write_post_text(message: Message, state: FSMContext) -> None:
         await message.answer("Поки що ця версія приймає тільки текстові пости.")
         return
 
+    now = datetime.now(timezone)
     await state.update_data(text=message.text)
-    await state.set_state(PostForm.choosing_time)
+    await state.set_state(PostForm.choosing_date)
     await message.answer(
-        "Коли опублікувати?\n\n"
-        "Формат: 03.06.2026 18:30\n"
-        "Також можна: 2026-06-03 18:30\n\n"
-        f"Часовий пояс: {TIMEZONE_NAME}"
+        f"Виберіть дату публікації.\nЧасовий пояс: {TIMEZONE_NAME}",
+        reply_markup=month_keyboard(now.year, now.month),
     )
 
 
-@dp.message(PostForm.choosing_time)
-async def choose_post_time(message: Message, state: FSMContext) -> None:
-    publish_at = parse_publish_time(message.text or "")
+@dp.callback_query(PostForm.choosing_date, F.data == "cal:ignore")
+async def ignore_calendar_button(callback: CallbackQuery) -> None:
+    await callback.answer()
 
-    if not publish_at:
-        await message.answer(
-            "Не вдалося прочитати дату або час уже минув.\n"
-            "Спробуйте так: 03.06.2026 18:30"
+
+@dp.callback_query(PostForm.choosing_date, F.data.startswith("cal:month:"))
+async def change_calendar_month(callback: CallbackQuery) -> None:
+    _, _, year, month = callback.data.split(":")
+    await callback.message.edit_reply_markup(reply_markup=month_keyboard(int(year), int(month)))
+    await callback.answer()
+
+
+@dp.callback_query(PostForm.choosing_date, F.data.startswith("cal:day:"))
+async def choose_post_date(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, year, month, day = callback.data.split(":")
+    selected_date = date(int(year), int(month), int(day))
+
+    await state.update_data(publish_date=selected_date.isoformat())
+    await state.set_state(PostForm.choosing_hour)
+    await callback.message.answer(
+        f"Дата: {selected_date.strftime('%d.%m.%Y')}\nВиберіть годину:",
+        reply_markup=hour_keyboard(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(PostForm.choosing_hour, F.data.startswith("hour:"))
+async def choose_post_hour(callback: CallbackQuery, state: FSMContext) -> None:
+    hour = int(callback.data.split(":", 1)[1])
+
+    await state.update_data(publish_hour=hour)
+    await state.set_state(PostForm.choosing_minute)
+    await callback.message.answer(
+        f"Година: {hour:02d}:00\nВиберіть хвилини:",
+        reply_markup=minute_keyboard(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(PostForm.choosing_minute, F.data.startswith("minute:"))
+async def choose_post_minute(callback: CallbackQuery, state: FSMContext) -> None:
+    minute = int(callback.data.split(":", 1)[1])
+    data = await state.get_data()
+
+    publish_at_dt = datetime.fromisoformat(data["publish_date"]).replace(
+        hour=data["publish_hour"],
+        minute=minute,
+        second=0,
+        tzinfo=timezone,
+    )
+
+    if publish_at_dt <= datetime.now(timezone):
+        await state.set_state(PostForm.choosing_date)
+        now = datetime.now(timezone)
+        await callback.message.answer(
+            "Цей час уже минув. Виберіть іншу дату й час:",
+            reply_markup=month_keyboard(now.year, now.month),
         )
+        await callback.answer()
         return
 
-    data = await state.get_data()
+    publish_at = publish_at_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
@@ -308,7 +371,7 @@ async def choose_post_time(message: Message, state: FSMContext) -> None:
             VALUES (?, ?, ?, ?)
             """,
             (
-                message.from_user.id,
+                callback.from_user.id,
                 data["channel_id"],
                 data["text"],
                 publish_at,
@@ -317,10 +380,11 @@ async def choose_post_time(message: Message, state: FSMContext) -> None:
         await db.commit()
 
     await state.clear()
-    await message.answer(
+    await callback.message.answer(
         f"✅ Пост додано в чергу.\n\nЧас публікації: {publish_at}",
         reply_markup=main_keyboard(),
     )
+    await callback.answer()
 
 
 @dp.message(F.text == "📋 Черга")
@@ -377,14 +441,6 @@ async def cancel_post(callback: CallbackQuery) -> None:
 
     await callback.message.answer(f"🗑 Пост #{post_id} скасовано.")
     await callback.answer()
-
-
-@dp.message(F.text == "❤️ Підтримати")
-async def donate(message: Message) -> None:
-    await message.answer(
-        "❤️ Дякуємо за підтримку проєкту!\n\n"
-        "Пізніше тут можна додати Monobank банку або Patreon."
-    )
 
 
 @dp.message()
