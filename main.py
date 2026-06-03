@@ -4,11 +4,11 @@ import json
 import logging
 import os
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import aiosqlite
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -59,6 +59,16 @@ MONTHS = {
 
 REPEAT_LABELS = {"none": "Без повтору", "daily": "Щодня", "weekly": "Щотижня"}
 PARSE_LABELS = {"": "Без форматування", "HTML": "HTML", "MarkdownV2": "MarkdownV2"}
+
+
+class ActivityMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if isinstance(event, Message) and event.from_user:
+            await upsert_user(DB_NAME, event.from_user)
+        return await handler(event, data)
+
+
+dp.message.middleware(ActivityMiddleware())
 
 
 class PostForm(StatesGroup):
@@ -230,6 +240,30 @@ def edit_keyboard(group_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def admin_stats_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Користувачі", callback_data="admin_users:0")]
+        ]
+    )
+
+
+def admin_users_keyboard(offset: int, total: int, limit: int = 10) -> InlineKeyboardMarkup:
+    buttons = []
+    row = []
+
+    if offset > 0:
+        row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users:{max(offset - limit, 0)}"))
+
+    if offset + limit < total:
+        row.append(InlineKeyboardButton(text="➡️ Далі", callback_data=f"admin_users:{offset + limit}"))
+
+    if row:
+        buttons.append(row)
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def post_buttons_from_json(buttons_json: str | None) -> InlineKeyboardMarkup | None:
     if not buttons_json:
         return None
@@ -338,6 +372,41 @@ async def save_post_group(user_id: int, data: dict) -> None:
         await db.commit()
 
 
+async def cleanup_unavailable_channels() -> int:
+    me = await bot.get_me()
+    removed = 0
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT id, channel_id FROM channels")
+        channels = await cursor.fetchall()
+
+    for channel in channels:
+        is_available = True
+        try:
+            member = await bot.get_chat_member(channel["channel_id"], me.id)
+            if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+                is_available = False
+        except Exception:
+            is_available = False
+
+        if not is_available:
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("DELETE FROM channels WHERE id=?", (channel["id"],))
+                await db.execute(
+                    """
+                    UPDATE posts
+                    SET status='cancelled'
+                    WHERE channel_id=? AND status='pending'
+                    """,
+                    (channel["channel_id"],),
+                )
+                await db.commit()
+            removed += 1
+
+    return removed
+
+
 @dp.message(CommandStart())
 async def start(message: Message) -> None:
     await upsert_user(DB_NAME, message.from_user)
@@ -365,8 +434,14 @@ async def admin_stats(message: Message) -> None:
         await message.answer("Ця кнопка доступна тільки власнику бота.")
         return
 
+    removed_channels = await cleanup_unavailable_channels()
+    active_24h = (datetime.utcnow() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    active_7d = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+
     async with aiosqlite.connect(DB_NAME) as db:
         users = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
+        active_today = (await (await db.execute("SELECT COUNT(*) FROM users WHERE last_seen >= ?", (active_24h,))).fetchone())[0]
+        active_week = (await (await db.execute("SELECT COUNT(*) FROM users WHERE last_seen >= ?", (active_7d,))).fetchone())[0]
         channels = (await (await db.execute("SELECT COUNT(*) FROM channels")).fetchone())[0]
         pending = (await (await db.execute("SELECT COUNT(*) FROM posts WHERE status='pending'")).fetchone())[0]
         sent = (await (await db.execute("SELECT COUNT(*) FROM posts WHERE status='sent'")).fetchone())[0]
@@ -374,10 +449,61 @@ async def admin_stats(message: Message) -> None:
     await message.answer(
         "📊 Статистика бота\n\n"
         f"Користувачів: {users}\n"
-        f"Каналів: {channels}\n"
+        f"Активні за 24 год: {active_today}\n"
+        f"Активні за 7 днів: {active_week}\n"
+        f"Актуальних каналів: {channels}\n"
+        f"Видалено недоступних каналів: {removed_channels}\n"
         f"Постів у черзі: {pending}\n"
-        f"Опубліковано: {sent}"
+        f"Опубліковано: {sent}",
+        reply_markup=admin_stats_keyboard(),
     )
+
+
+@dp.callback_query(F.data.startswith("admin_users:"))
+async def admin_users(callback: CallbackQuery) -> None:
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("Тільки для власника бота.", show_alert=True)
+        return
+
+    offset = int(callback.data.split(":", 1)[1])
+    limit = 10
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        db.row_factory = aiosqlite.Row
+        total = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
+        cursor = await db.execute(
+            """
+            SELECT user_id, username, first_name, created_at, last_seen
+            FROM users
+            ORDER BY last_seen DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        users = await cursor.fetchall()
+
+    if not users:
+        await callback.message.answer("Користувачів ще немає.")
+        await callback.answer()
+        return
+
+    text = f"👥 Користувачі {offset + 1}-{offset + len(users)} з {total}\n\n"
+    for user in users:
+        username = f"@{user['username']}" if user["username"] else "без username"
+        first_name = user["first_name"] or "без імені"
+        text += (
+            f"ID: {user['user_id']}\n"
+            f"Username: {username}\n"
+            f"Ім'я: {first_name}\n"
+            f"Перший старт: {user['created_at']}\n"
+            f"Остання активність: {user['last_seen']}\n\n"
+        )
+
+    await callback.message.answer(
+        text,
+        reply_markup=admin_users_keyboard(offset, total, limit),
+    )
+    await callback.answer()
 
 
 @dp.message(F.text == "➕ Додати канал")
