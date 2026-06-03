@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import aiosqlite
@@ -31,12 +31,12 @@ async def publish_due_posts(bot: Bot, db_name: str, timezone: ZoneInfo) -> None:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, channel_id, text
+            SELECT id, channel_id, text, media_type, media_file_id, publish_at, repeat_type
             FROM posts
             WHERE status='pending'
               AND publish_at <= ?
             ORDER BY publish_at ASC
-            LIMIT 20
+            LIMIT 30
             """,
             (now,),
         )
@@ -44,15 +44,43 @@ async def publish_due_posts(bot: Bot, db_name: str, timezone: ZoneInfo) -> None:
 
     for post in posts:
         try:
-            await bot.send_message(chat_id=post["channel_id"], text=post["text"])
+            await send_post(bot, post)
         except Exception as exc:
             logging.exception("Failed to publish post %s", post["id"])
             await mark_failed(db_name, post["id"], str(exc)[:500])
         else:
-            await mark_sent(db_name, post["id"])
+            await mark_published(db_name, post, timezone)
 
 
-async def mark_sent(db_name: str, post_id: int) -> None:
+async def send_post(bot: Bot, post: aiosqlite.Row) -> None:
+    if post["media_type"] == "photo":
+        await bot.send_photo(
+            chat_id=post["channel_id"],
+            photo=post["media_file_id"],
+            caption=post["text"] or None,
+        )
+        return
+
+    if post["media_type"] == "video":
+        await bot.send_video(
+            chat_id=post["channel_id"],
+            video=post["media_file_id"],
+            caption=post["text"] or None,
+        )
+        return
+
+    await bot.send_message(chat_id=post["channel_id"], text=post["text"])
+
+
+async def mark_published(db_name: str, post: aiosqlite.Row, timezone: ZoneInfo) -> None:
+    if post["repeat_type"] == "daily":
+        await reschedule(db_name, post["id"], post["publish_at"], timezone, days=1)
+        return
+
+    if post["repeat_type"] == "weekly":
+        await reschedule(db_name, post["id"], post["publish_at"], timezone, days=7)
+        return
+
     async with aiosqlite.connect(db_name) as db:
         await db.execute(
             """
@@ -60,7 +88,33 @@ async def mark_sent(db_name: str, post_id: int) -> None:
             SET status='sent', sent_at=CURRENT_TIMESTAMP, error=NULL
             WHERE id=?
             """,
-            (post_id,),
+            (post["id"],),
+        )
+        await db.commit()
+
+
+async def reschedule(
+    db_name: str,
+    post_id: int,
+    publish_at: str,
+    timezone: ZoneInfo,
+    days: int,
+) -> None:
+    current_time = datetime.strptime(publish_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone)
+    next_time = current_time + timedelta(days=days)
+    now = datetime.now(timezone)
+
+    while next_time <= now:
+        next_time += timedelta(days=days)
+
+    async with aiosqlite.connect(db_name) as db:
+        await db.execute(
+            """
+            UPDATE posts
+            SET publish_at=?, status='pending', sent_at=CURRENT_TIMESTAMP, error=NULL
+            WHERE id=?
+            """,
+            (next_time.strftime("%Y-%m-%d %H:%M:%S"), post_id),
         )
         await db.commit()
 
