@@ -25,10 +25,15 @@ CREATE TABLE IF NOT EXISTS channels (
 CREATE_POSTS = """
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id TEXT,
     user_id INTEGER NOT NULL,
     channel_id INTEGER NOT NULL,
-    text TEXT NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    media_type TEXT NOT NULL DEFAULT 'text',
+    media_file_id TEXT,
     publish_at TEXT NOT NULL,
+    repeat_type TEXT NOT NULL DEFAULT 'none',
+    repeat_weekday INTEGER,
     status TEXT NOT NULL DEFAULT 'pending',
     error TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -43,7 +48,29 @@ async def init_db(db_name: str) -> None:
         await db.execute(CREATE_USERS)
         await db.execute(CREATE_CHANNELS)
         await db.execute(CREATE_POSTS)
+        await migrate_posts(db)
         await db.commit()
+
+
+async def migrate_posts(db: aiosqlite.Connection) -> None:
+    cursor = await db.execute("PRAGMA table_info(posts)")
+    columns = {row[1] for row in await cursor.fetchall()}
+
+    migrations = {
+        "group_id": "ALTER TABLE posts ADD COLUMN group_id TEXT",
+        "media_type": "ALTER TABLE posts ADD COLUMN media_type TEXT NOT NULL DEFAULT 'text'",
+        "media_file_id": "ALTER TABLE posts ADD COLUMN media_file_id TEXT",
+        "repeat_type": "ALTER TABLE posts ADD COLUMN repeat_type TEXT NOT NULL DEFAULT 'none'",
+        "repeat_weekday": "ALTER TABLE posts ADD COLUMN repeat_weekday INTEGER",
+    }
+
+    for column, sql in migrations.items():
+        if column not in columns:
+            await db.execute(sql)
+
+    await db.execute("UPDATE posts SET group_id = CAST(id AS TEXT) WHERE group_id IS NULL")
+    await db.execute("UPDATE posts SET media_type = 'text' WHERE media_type IS NULL")
+    await db.execute("UPDATE posts SET repeat_type = 'none' WHERE repeat_type IS NULL")
 
 
 async def upsert_user(db_name: str, user) -> None:
