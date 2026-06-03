@@ -344,9 +344,19 @@ async def save_post_group(user_id: int, data: dict) -> None:
     group_id = uuid.uuid4().hex
     publish_at_dt = datetime.strptime(data["publish_at"], "%Y-%m-%d %H:%M:%S")
     repeat_weekday = publish_at_dt.weekday() if data["repeat_type"] == "weekly" else None
+    allowed_channels = await get_user_channels(user_id)
+    allowed_channel_ids = {channel["channel_id"] for channel in allowed_channels}
+    channel_ids = [
+        channel_id
+        for channel_id in data["channel_ids"]
+        if channel_id in allowed_channel_ids
+    ]
+
+    if not channel_ids:
+        raise ValueError("No valid channels for this user")
 
     async with aiosqlite.connect(DB_NAME) as db:
-        for channel_id in data["channel_ids"]:
+        for channel_id in channel_ids:
             await db.execute(
                 """
                 INSERT INTO posts(
@@ -533,6 +543,16 @@ async def add_channel(message: Message) -> None:
         await message.answer("Я ще не адміністратор цього каналу.")
         return
 
+    try:
+        user_member = await bot.get_chat_member(chat.id, message.from_user.id)
+    except Exception:
+        await message.answer("Я не можу перевірити, що ви адміністратор цього каналу.")
+        return
+
+    if user_member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+        await message.answer("Додавати можна тільки канали, де ви є адміністратором.")
+        return
+
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             """
@@ -578,12 +598,22 @@ async def create_post(message: Message, state: FSMContext) -> None:
 @dp.callback_query(PostForm.choosing_channels, F.data.startswith("sel:"))
 async def toggle_post_channel(callback: CallbackQuery, state: FSMContext) -> None:
     channel_id = int(callback.data.split(":", 1)[1])
+    channels = await get_user_channels(callback.from_user.id)
+    allowed_channel_ids = {channel["channel_id"] for channel in channels}
+
+    if channel_id not in allowed_channel_ids:
+        await callback.answer("Цей канал вам не належить.", show_alert=True)
+        return
+
     data = await state.get_data()
     selected = data.get("channel_ids", [])
-    selected.remove(channel_id) if channel_id in selected else selected.append(channel_id)
+    if channel_id in selected:
+        selected.remove(channel_id)
+    else:
+        selected.append(channel_id)
 
     await state.update_data(channel_ids=selected)
-    await callback.message.edit_reply_markup(reply_markup=selected_channels_keyboard(await get_user_channels(callback.from_user.id), selected))
+    await callback.message.edit_reply_markup(reply_markup=selected_channels_keyboard(channels, selected))
     await callback.answer()
 
 
