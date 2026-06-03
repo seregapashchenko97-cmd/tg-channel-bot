@@ -7,12 +7,9 @@ import aiosqlite
 from aiogram import Bot
 
 
-PROMO_FOOTER = "\n\n—\nАвтопостинг через PostPilot UA"
-
-
 async def scheduler(
     bot: Bot,
-    db_name: str = "bot.db",
+    db_name: str,
     timezone_name: str = "Europe/Kyiv",
     interval_seconds: int = 15,
 ) -> None:
@@ -22,7 +19,7 @@ async def scheduler(
         try:
             await publish_due_posts(bot, db_name, timezone)
         except Exception:
-            logging.exception("Scheduler error")
+            logging.exception("Scheduler loop failed")
 
         await asyncio.sleep(interval_seconds)
 
@@ -32,41 +29,25 @@ async def publish_due_posts(bot: Bot, db_name: str, timezone: ZoneInfo) -> None:
 
     async with aiosqlite.connect(db_name) as db:
         db.row_factory = aiosqlite.Row
-
         cursor = await db.execute(
             """
-            SELECT
-                posts.id,
-                posts.channel_id,
-                posts.text,
-                channels.promo_enabled
+            SELECT id, channel_id, text
             FROM posts
-            JOIN channels
-                ON channels.user_id = posts.user_id
-               AND channels.channel_id = posts.channel_id
-            WHERE posts.status='pending'
-              AND posts.publish_at <= ?
-            ORDER BY posts.publish_at ASC
+            WHERE status='pending'
+              AND publish_at <= ?
+            ORDER BY publish_at ASC
             LIMIT 20
             """,
             (now,),
         )
-
         posts = await cursor.fetchall()
 
     for post in posts:
-        text = post["text"]
-
-        if post["promo_enabled"]:
-            text += PROMO_FOOTER
-
         try:
-            await bot.send_message(
-                chat_id=post["channel_id"],
-                text=text
-            )
-        except Exception as error:
-            await mark_failed(db_name, post["id"], str(error))
+            await bot.send_message(chat_id=post["channel_id"], text=post["text"])
+        except Exception as exc:
+            logging.exception("Failed to publish post %s", post["id"])
+            await mark_failed(db_name, post["id"], str(exc)[:500])
         else:
             await mark_sent(db_name, post["id"])
 
@@ -76,9 +57,7 @@ async def mark_sent(db_name: str, post_id: int) -> None:
         await db.execute(
             """
             UPDATE posts
-            SET status='sent',
-                sent_at=CURRENT_TIMESTAMP,
-                error=NULL
+            SET status='sent', sent_at=CURRENT_TIMESTAMP, error=NULL
             WHERE id=?
             """,
             (post_id,),
@@ -91,10 +70,9 @@ async def mark_failed(db_name: str, post_id: int, error: str) -> None:
         await db.execute(
             """
             UPDATE posts
-            SET status='failed',
-                error=?
+            SET status='failed', error=?
             WHERE id=?
             """,
-            (error[:500], post_id),
+            (error, post_id),
         )
         await db.commit()
