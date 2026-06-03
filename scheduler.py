@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import aiosqlite
 from aiogram import Bot
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 async def scheduler(
@@ -24,6 +26,25 @@ async def scheduler(
         await asyncio.sleep(interval_seconds)
 
 
+def build_post_keyboard(buttons_json: str | None) -> InlineKeyboardMarkup | None:
+    if not buttons_json:
+        return None
+
+    try:
+        rows = json.loads(buttons_json)
+    except json.JSONDecodeError:
+        return None
+
+    keyboard = []
+    for row in rows:
+        keyboard_row = []
+        for button in row:
+            keyboard_row.append(InlineKeyboardButton(text=button["text"], url=button["url"]))
+        keyboard.append(keyboard_row)
+
+    return InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+
+
 async def publish_due_posts(bot: Bot, db_name: str, timezone: ZoneInfo) -> None:
     now = datetime.now(timezone).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -31,7 +52,16 @@ async def publish_due_posts(bot: Bot, db_name: str, timezone: ZoneInfo) -> None:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
-            SELECT id, channel_id, text, media_type, media_file_id, publish_at, repeat_type
+            SELECT
+                id,
+                channel_id,
+                text,
+                media_type,
+                media_file_id,
+                parse_mode,
+                buttons_json,
+                publish_at,
+                repeat_type
             FROM posts
             WHERE status='pending'
               AND publish_at <= ?
@@ -53,11 +83,16 @@ async def publish_due_posts(bot: Bot, db_name: str, timezone: ZoneInfo) -> None:
 
 
 async def send_post(bot: Bot, post: aiosqlite.Row) -> None:
+    reply_markup = build_post_keyboard(post["buttons_json"])
+    parse_mode = post["parse_mode"] or None
+
     if post["media_type"] == "photo":
         await bot.send_photo(
             chat_id=post["channel_id"],
             photo=post["media_file_id"],
             caption=post["text"] or None,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
         )
         return
 
@@ -66,10 +101,17 @@ async def send_post(bot: Bot, post: aiosqlite.Row) -> None:
             chat_id=post["channel_id"],
             video=post["media_file_id"],
             caption=post["text"] or None,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
         )
         return
 
-    await bot.send_message(chat_id=post["channel_id"], text=post["text"])
+    await bot.send_message(
+        chat_id=post["channel_id"],
+        text=post["text"],
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
 
 
 async def mark_published(db_name: str, post: aiosqlite.Row, timezone: ZoneInfo) -> None:
