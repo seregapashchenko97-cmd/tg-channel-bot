@@ -82,6 +82,7 @@ class EditForm(StatesGroup):
 
 def main_keyboard(user_id: int | None = None) -> ReplyKeyboardMarkup:
     keyboard = [
+        [KeyboardButton(text="🏠 Старт")],
         [KeyboardButton(text="📢 Мої канали"), KeyboardButton(text="➕ Додати канал")],
         [KeyboardButton(text="📝 Створити пост"), KeyboardButton(text="📋 Черга")],
     ]
@@ -339,6 +340,17 @@ async def save_post_group(user_id: int, data: dict) -> None:
 
 @dp.message(CommandStart())
 async def start(message: Message) -> None:
+    await upsert_user(DB_NAME, message.from_user)
+    await message.answer(
+        "🚀 PostPilot UA\n\n"
+        "Безкоштовний автопостинг для Telegram-каналів.",
+        reply_markup=main_keyboard(message.from_user.id),
+    )
+
+
+@dp.message(F.text == "🏠 Старт")
+async def start_button(message: Message, state: FSMContext) -> None:
+    await state.clear()
     await upsert_user(DB_NAME, message.from_user)
     await message.answer(
         "🚀 PostPilot UA\n\n"
